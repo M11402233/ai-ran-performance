@@ -1,0 +1,21 @@
+# Local binaries, environments and build products
+bin/
+builds/
+.venv*/
+venv/
+__pycache__/
+*.py[cod]
+
+# Raw measurements, live sessions and large download packages
+results/
+*.zip
+
+# Local settings and credentials
+.agents/
+.codex/
+.aws/
+.env
+.env.*
+!.env.example
+*.pem
+*.key

@@ -1,0 +1,12 @@
+--- a/apps/services/worker_manager/worker_manager.cpp
++++ b/apps/services/worker_manager/worker_manager.cpp
+@@ -336,7 +336,8 @@
+ 
+   unsigned nof_workers = 0;
+   if (worker_cfg.nof_main_pool_threads.has_value()) {
+-    nof_workers = worker_cfg.nof_main_pool_threads.value();
++    // Honor an explicit pool size; spare-CPU reservation applies only to auto sizing.
++    return std::max(1U, std::min(worker_cfg.nof_main_pool_threads.value(), avail_cpus));
+   } else {
+     // Estimation of minimum number of workers needed for the application using the formula:
+     // nof_workers = nof_cells * (nof_dl_antennas + nof_ul_antennas + 1) + 2

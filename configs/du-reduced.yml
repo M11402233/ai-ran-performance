@@ -1,0 +1,31 @@
+cu_up:
+  ngu:
+    no_core: true
+ru_dummy:
+  dl_processing_delay: 1
+  time_scaling: 1
+cell_cfg:
+  dl_arfcn: 368500
+  band: 3
+  channel_bandwidth_MHz: 5
+  common_scs: 15
+  plmn: "00101"
+  tac: 7
+  pci: 1
+test_mode:
+  test_ue:
+    rnti: 0x44
+    nof_ues: 1
+    ri: 1
+    cqi: 15
+    pusch_active: true
+    pdsch_active: true
+metrics:
+  enable_log: true
+  layers:
+    enable_executor: true
+  periodicity:
+    executors_report_period: 1000
+log:
+  filename: results/raw/gnb.log
+  all_level: warning

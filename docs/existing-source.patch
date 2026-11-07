@@ -1,0 +1,35 @@
+diff --git a/lib/e2/e2sm/e2sm_kpm/e2sm_kpm_report_service_impl.cpp b/lib/e2/e2sm/e2sm_kpm/e2sm_kpm_report_service_impl.cpp
+index 25ae3e6..21c8774 100644
+--- a/lib/e2/e2sm/e2sm_kpm/e2sm_kpm_report_service_impl.cpp
++++ b/lib/e2/e2sm/e2sm_kpm/e2sm_kpm_report_service_impl.cpp
+@@ -73,7 +73,7 @@ bool e2sm_kpm_report_service_base::initialize_ric_ind_msg_format_1(meas_info_lis
+                                                                    e2sm_kpm_ind_msg_format1_s& ric_ind_msg)
+ {
+   if (granul_period) {
+-    ric_ind_msg.granul_period_present = true;
++    ric_ind_msg.granul_period_present = false;
+     ric_ind_msg.granul_period         = granul_period;
+   } else {
+     ric_ind_msg.granul_period = 0;
+@@ -144,8 +144,8 @@ void e2sm_kpm_report_service_style1::clear_collect_measurements()
+ bool e2sm_kpm_report_service_style1::collect_measurements()
+ {
+   // Set the granularity period.
+-  ric_ind_message.granul_period_present = true;
+-  ric_ind_message.granul_period         = granul_period;
++  ric_ind_message.granul_period_present = false;
++  // ric_ind_message.granul_period         = granul_period;
+ 
+   // Fill indication msg.
+   std::vector<meas_record_item_c> meas_records_items;
+@@ -239,8 +239,8 @@ e2sm_kpm_report_service_style3::e2sm_kpm_report_service_style3(e2sm_kpm_action_d
+ 
+   // Initialize RIC indication metadata.
+   if (granul_period) {
+-    ric_ind_message.granul_period_present = true;
+-    ric_ind_message.granul_period         = granul_period;
++    ric_ind_message.granul_period_present = false;
++    // ric_ind_message.granul_period         = granul_period;
+   } else {
+     ric_ind_message.granul_period = 0;
+   }

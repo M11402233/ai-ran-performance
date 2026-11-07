@@ -1,0 +1,274 @@
+SIDE PROJECT  /  RESEARCH PROPOSAL
+AI–RAN Performance Interferenceand Resource Optimizationon Commodity Hardware
+基於一般消費級電腦之 AI 與 5G RAN 效能干擾分析及資源最佳化
+Research focus   5G DU  ·  Linux perf  ·  Hardware counters  ·  Latency profiling  ·  CPU isolation
+計畫型態  個人可重現實驗型 side project（不以論文發表為必要條件）
+版本  v1.0     制訂日期  2026-10-30     預估時程  8 週（依硬體驗證與課業彈性調整）
+摘要
+本計畫以一台既有 Windows x86 電腦為起點，部署 Linux 上的 OCUDU（srsRAN Project 後繼專案）軟體化 5G gNB/DU，利用 ru_dummy 與 testmode 建立可控的 DU 計算負載。研究依序測量 AI / CPU 背景工作造成的干擾、利用 Linux perf 與 DU executor metrics 診斷原因，再驗證 CPU affinity、cgroup 隔離與 AI 工作負載限制是否改善即時處理表現。
+所有核心結論限定在「單機、合成 DU 負載、指定軟硬體配置」條件。除非另行建置 UE / Core / radio emulator 的端到端路徑，否則不宣稱已量測真實 UE user-plane throughput，也不以平均值或最大值代替 P99。
+一頁式計畫總覽
+面向
+預定方案
+目標
+找出 AI 與 RAN 共置時可重現的效能干擾，解釋瓶頸，驗證低成本改善方法。
+研究問題
+RQ1：干擾有沒有發生？ RQ2：瓶頸在哪裡？ RQ3：隔離能否改善？
+主要系統
+OCUDU / srsRAN DU，ru_dummy + testmode，Linux perf，Python/PyTorch。
+硬體限制
+Windows x86；預估 4 核心、16 GB RAM、NVIDIA GPU；CPU/GPU 型號與核心架構待查。
+主 OS 方案
+Windows 保留；使用實體 Ubuntu（雙系統、外接 SSD 或其他可直接開機的方式）。
+最低可交付成果
+測試腳本、原始 metrics、3 張核心比較圖、可重現 README、8–12 頁技術報告。
+
+1. 研究背景、文獻與研究定位
+軟體化 RAN 將 MAC / PHY 等時間敏感運算帶到通用 CPU。既有文獻指出處理器層級行為和 RAN 效能值得共同觀察；另外 AI 與 RAN 共用資源可能造成吞吐量與錯誤率的變化，DRL 資源分配的收益也需要與自身系統開銷一起衡量。[R1–R3]
+公開研究
+已做的事
+本專題的切入點
+PRO-RAN (2026) [R1]
+以 OCUDU / VTune 分析 CU/DU 的 CPU 與微架構特徵。
+聚焦「AI 工作共置後」的 DU executor latency，採更低成本的 Linux perf 與小規模干擾實驗。
+Jeong et al. (2025) [R2]
+在 simulator / dataset 上評估 DRL CPU allocation。
+先檢查真實 host 的控制成本、排程競爭與隔離效果，DRL 留作延伸。
+Jung et al. (2026) [R3]
+AI-and-RAN co-location 測試顯示受限條件下 DL 吞吐量降低、BLER 上升。
+在 4-core 級消費設備測最小化測試案例與 CPU-side contention path。
+
+研究定位：本案是 exploration + performance characterization + optimization validation；不宣稱首次提出 AI-RAN co-location 或 CPU pinning，重視可重現性、效能歸因與負結果的可解釋性。
+2. 三個 Research Questions、假說與可測量條件
+RQ1｜Performance interference：AI 工作會干擾 DU 嗎？
+RQ1 — To what extent do concurrent AI training/inference and background CPU workloads alter DU task execution latency and queueing behavior on a commodity host?
+假說 H1：在固定 DU workload 下，當 AI 的 CPU-side 活動或純 CPU 壓力增加時，DU executor 的 enqueue latency 或 task duration 可能惡化；效果大小取決於 CPU 共用程度。
+自變項：背景工作 {none, CPU stress, GPU inference, GPU training}；每種低/高負載；DU testmode 配置固定。依變項：enqueue_avg / enqueue_max、task_avg / task_max、CPU usage、context switches、defers。必要對照：DU only。
+通過判準：取得每一條件至少 5 次可重現的 runs；能報告效應方向、變異及不確定性。未發現干擾也算有效結果。
+RQ2｜Bottleneck diagnosis：CPU 到底卡在哪裡？
+RQ2 — Are observed DU degradations better explained by CPU scheduling interference, compute saturation, or measurable cache/memory-side changes?
+假說 H2：部分惡化可由 context switches / CPU migrations / enqueue delay 的增長解釋；其他情況可能反映 cycles、IPC 或 cache behavior 的變化。這是待檢驗的競爭假說，不預先指定單一原因。
+證據鏈：perf stat（cycles、instructions、cache references/misses、context switches）、perf record（hotspots）、DU metrics（executor latency / defers）、CPU affinity & frequency / thermal logs。PMU 計數需確認 CPU 支援；cache-misses 不能直接等於 DRAM bandwidth。
+通過判準：至少分析 1 個發生變化或未發生變化的 scenario，提出兩種以上候選機制並用控制實驗排除混淆。
+RQ3｜Resource optimization：隔離值得嗎？
+RQ3 — Can CPU affinity, cgroup CPU limits, or AI-side concurrency throttling mitigate DU performance degradation without excessive loss of AI throughput?
+假說 H3：在存在可測干擾的條件下，合理的 CPU core 配置或降低 AI CPU worker 數，可能縮短 DU enqueue delay；但 4-core 系統也可能因可用核心不足而產生反效果。
+策略：A default；B CPU affinity（DU 與 AI 分核，按實際 logical/physical topology 安排）；C cgroup 限額或 cpuset；D PyTorch CPU threads/DataLoader workers 降低。比較：DU delay、AI samples/s（或 inference/s）、整體 CPU 使用、執行失敗率。
+通過判準：提供相同 RQ1 條件下 before/after 的配對比較，說清楚改善幅度和 AI 端代價。DRL 控制器不是三個 RQ 的必要條件，列為獨立 stretch goal。
+3. 硬體、作業系統與採購策略
+元件名稱
+目前已知 / 暫定規格
+驗證方式與備註
+Host
+Windows x86-64；CPU 廠牌可能 Intel / AMD。
+Windows：Get-CimInstance Win32_Processor。
+CPU
+推估約 4 cores；logical processors / SMT 未知。
+記錄 Name、NumberOfCores、NumberOfLogicalProcessors；4 核心不等於 4 threads。
+RAM
+推估 16 GB。
+Get-CimInstance Win32_PhysicalMemory；注意實際可用記憶體。
+GPU
+NVIDIA，型號、VRAM、CUDA 支援待確認。
+nvidia-smi；若 GPU 不相容，改 CPU-only toy AI 負載。
+Storage
+SSD 與剩餘空間未知；建議備有 40–60 GB 可用空間。
+優先使用現有磁碟；外接 SSD 只是 Linux 開機選項，非必要採購。
+Radio hardware
+USRP / SDR：無需求。
+主線使用 ru_dummy/testmode，僅測合成 DU 計算行為。
+
+OS 實作決策
+建議方案：保留 Windows，從 Ubuntu 22.04/24.04 LTS 以 bare-metal 方式開機；先備份資料並確認 BitLocker/磁碟加密設定，避免貿然改分割區。
+次佳方案：WSL2 可做程式、Python、Git、文件及初步功能驗證；因虛擬化，不能假設 PMU counter 可用，也不以其 scheduling latency 作正式結論。
+備用方案：若當下完全不能啟動實體 Linux，可先在 Windows 以 Task Manager、PerfMon、ETW / WPR 做系統壓力基礎練習，但不可與 Linux perf counter 數值混為同一實驗。
+首次測試不必購買新 GPU、SDR 或專用伺服器；等確認硬體需求再決定是否升級。
+Windows 硬體盤點（PowerShell）
+Get-CimInstance Win32_Processor | Select-Object Name,NumberOfCores,NumberOfLogicalProcessorsGet-CimInstance Win32_ComputerSystem | Select-Object TotalPhysicalMemoryGet-CimInstance Win32_VideoController | Select-Object Name,AdapterRAMnvidia-smiGet-Volume | Select-Object DriveLetter,FileSystemLabel,SizeRemaining
+盤點輸出應存入 docs/hardware-inventory.md；不要在報告中用「4 cores」代替尚未驗證的核心數、SMT 或 CPU 型號。
+4. Testbed 架構與資料流
+Synthetic UE load (testmode) → OCUDU gNB/DU (ru_dummy, no_core) → executor & application metrics；同機運行 PyTorch / stress-ng 背景工作。Linux perf 讀 CPU/OS events，nvidia-smi 監控 GPU；Python 以 run_id、時間戳、條件設定彙整。
+層級
+元件 / 工具
+採集內容
+RAN compute
+OCUDU gNB + ru_dummy + testmode
+UE 模擬數、低頻寬配置、DU task / enqueue delay、defers。
+CPU/OS
+perf stat, perf record, pidstat, taskset, cgroups
+cycles, instructions, cache events, CPU migrations / context switches, hotspot。
+AI workload
+Python + PyTorch；NVIDIA CUDA（若可用）
+inference/s、training steps/s、GPU usage、CPU thread count、resident memory。
+Log & analysis
+Python pandas, matplotlib, CSV/JSON
+每次 run 的設定、時間戳、重複結果與統計圖。
+
+關鍵限制：ru_dummy 不經由真實 RF 或一般 OFH 網路傳送資料，故本案主要輸出不是 UE throughput、BLER 或真實端到端 RTT。要研究這些指標，須另做具 UE / Core / ZeroMQ 或 SDR 的高階 testbed。
+初始工具安裝與 smoke tests
+# On bare-metal Ubuntu: verify topology and counters firstlscpufree -hnvidia-smi    # skip if driver/GPU unavailableperf list | head -40perf stat -e cycles,instructions,context-switches -- sleep 5# Obtain current code and follow version-matched installation guidegit clone https://gitlab.com/ocudu/ocudu.git# Build with a conservative job count for a ~16 GB / 4-core host;# verify dependencies and exact flags in the selected OCUDU release docs.
+重要：上述只是一段安全的環境檢查與取得原始碼範例。gNB 可執行檔名稱、編譯選項、metrics YAML keys 必須依固定的 OCUDU release/tag 官方文件填入；不要將舊 srsRAN 的設定檔不經驗證直接套用新版本。
+5. 最小實驗矩陣：先小再大
+在 4-core / 16 GB 的可能條件下，以單一小頻寬 cell、1 UE 的可運作設定開始；若穩定才增加 2 或 4 UEs。不要一開始跑 100 MHz 或重型多 UE。先使用 30 s 暖機 + 60 s 採樣，每條件 5 runs；若變異很大再延長至 120 s，且隨機化執行順序。
+ID
+DU 負載
+背景工作
+資源策略
+主要用途
+S0
+低 / 固定
+None
+Default
+純 DU baseline
+S1
+同 S0
+stress-ng low
+Default
+純 CPU contention 正對照
+S2
+同 S0
+stress-ng high
+Default
+負載劑量效應
+S3
+同 S0
+MLP inference low
+Default
+AI inference 對照
+S4
+同 S0
+MLP / DQN training low
+Default
+AI training 對照
+S5
+同 S0
+Training high（若穩定）
+Default
+高干擾壓力
+S6
+同 S0
+採用 S4 / S5
+Affinity / cpuset
+隔離成效
+S7
+同 S0
+採用 S4 / S5
+AI thread throttling
+低成本替代方案
+
+如果低頻寬 DU baseline 都無法穩定運行，直接縮小測試至較低 UE / bandwidth；若仍不可行，停止提出 RAN 結論，改以獨立 C++ real-time workload 練習 Linux perf，並將「RAN 在本機不可行」列為 feasibility 觀察。
+操作與混淆因子控制
+固定 OCUDU git commit/tag、Linux kernel、BIOS/電源模式、CPU governor、AI seed、thread count、DU config；每次重啟需重新確認。
+記錄 CPU 溫度與頻率；避免背景更新、瀏覽器、Windows host VM 爭用；若是筆電，固定接電與散熱條件。
+測量工序需固定：先 DU warm-up，再開始背景工作與同步採樣；不同 run 使用明確 run_id、起止時間。
+不要同時開啟多個重型 profiler 導致 instrumentation overhead 混淆；先獨立 perf stat，再選代表性情況 perf record。
+cgroup v2、taskset 與 OCUDU 自身 thread affinity 可能互相作用；需驗證實際 CPU mask，不要假定 taskset 一定覆寫所有 worker。
+6. 指標定義、資料處理與分析方法
+指標
+計算 / 取得方式
+解讀注意事項
+CPU utilization
+OCUDU app_resource_usage、pidstat
+不等於完成工作量；多核心 process usage 可超過 100%。
+IPC
+instructions / cycles
+跨 CPU/負載比較時需說明頻率、event multiplexing 與 CPU 型號。
+Cache MPKI
+cache-misses / instructions × 1000
+event 意義依 PMU 而異，非 DRAM BW 直接測量。
+Enqueue latency
+executor enqueue_avg / enqueue_max
+平均與區間最大，不是 P99。
+Task duration
+executor task_avg / task_max
+要取得 P95/P99 需每次 task tracing 或額外 instrumentation。
+Context switches
+perf / executor metrics
+搭配排程追蹤解讀，不可直接證明 root cause。
+AI progress
+training steps/s、inference/s
+評估優化對 AI 任務的代價。
+Deadline misses
+僅有明確 deadline 且可取得事件時
+不得以 task_max > 某隨意門檻代稱標準化 deadline。
+
+主圖 1：executor enqueue_avg / max vs. workload type。主圖 2：cycles、IPC、context switches 與 DU delay 的成對變化。主圖 3：Default / affinity / throttling 的 DU delay 與 AI throughput trade-off。
+統計：每組至少 5 次獨立 runs；報告 median、mean、SD、95% CI（bootstrap 可選）、配對差值與 effect size。先畫所有原始點，避免只畫漂亮的 bar chart。若未取得逐任務時間戳，正式結果只使用 mean/max，不宣稱 P99。
+預期影響沒有預設方向；若干擾差異接近零，應回報該 workload 在本硬體的 CPU-side activity、測量解析度與不確定性，不應盲目加大負載直到出現想要的現象。
+7. 八週執行時程與 Go / No-Go 決策
+週次
+工作項目
+可交付成果 / Gate
+W1
+Windows 硬體盤點；確認 CPU 物理/邏輯核心、RAM、GPU VRAM、磁碟；決定 Ubuntu 開機方式。
+hardware-inventory.md；若無 bare-metal Linux，改用功能驗證分支。
+W2
+實體 Ubuntu、perf counters、OCUDU 安裝與最小 testmode；先確認 baseline。
+可執行 DU / sample config / baseline log；Gate 1：至少 1 個穩定情境。
+W3
+採集 DU-only、CPU stress 低/高；檢驗 RQ1 最基本干擾。
+S0–S2 × 5；圖 1 初版；Gate 2：測試具可重現性。
+W4
+加入小型 PyTorch inference/training；記錄 NVIDIA GPU 和 CPU workers。
+S3–S5；可重現 AI workload script；RQ1 答案草稿。
+W5
+perf stat / perf record + thread metrics；建立差異的可能解釋。
+hotspot summary、profiling reports、RQ2 機制表。
+W6
+CPU affinity / cpuset / 限制 DataLoader workers 或 torch threads。
+S6–S7；before/after；RQ3 答案草稿。
+W7
+補做負載控制、反證實驗、統計、錯誤分析；必要時降低測試規模。
+最終資料表、三張圖、limitations。
+W8
+整理 repository、README、技術報告、重現說明、簡短 demo。
+GitHub-ready package + 8–12 頁報告。
+
+8. 風險、Fallback 與專題邊界
+風險
+如何辨識
+Fallback
+無 Linux bare metal
+WSL2/VM PMU 不可用或數據與 host 差異很大
+先 Windows/WSL 開發；正式 profiling 暫停，安排 external boot / dual boot。
+4 核心不足
+DU-only 負載就持續大量延遲 / crash
+下調 UE/bandwidth / MIMO；縮短 run；先做 CPU-only microbenchmark。
+GPU 無 CUDA / VRAM 太少
+nvidia-smi 或 torch.cuda.is_available() 失敗
+用 CPU-only 的小 MLP；仍可回答純 CPU contention。
+PMU events 不支援
+perf list 無指定事件或讀出 unsupported
+先用 cycles/instructions/context-switches，省略精細 cache 假說。
+無逐任務 trace
+只有 executor avg/max
+不繪製 P99；必要時插樁或聚焦平均/最大值。
+隔離無效
+改善不顯著甚至變差
+保留負結果，檢查 CPU mapping、4 核心與 AI throughput 代價。
+時間不足
+DRL / end-to-end network 過度膨脹
+依次交付 Level 1 → Level 2 → Level 3；停在最小可重現成果。
+
+9. 可選延伸：DRL 與真正的 RAN throughput
+Extension A（資源管理 DRL）：在完成三個 RQ 後，先用離線記錄資料建立 toy environment：state = DU enqueue delay、CPU load、AI progress；action = AI CPU thread budget / training intensity；reward = DU latency penalty + AI progress。先比較 static 與 threshold rule，確保 DRL 超越簡單 heuristics 才有意義。不要把對 simulator 的改善宣稱為已證明的實機 RAN 最佳化。
+Extension B（端到端傳輸）：若未來取得更強硬體與實作時間，再建立 UE emulator + Open5GS + ZeroMQ 等完整 user plane，測 iperf3 throughput、packet loss、RTT 等，並檢查與 dummy DU latency 的相關性。此路徑明顯超出本 MVP 的最低交付範圍。
+10. 完成定義、Repository 結構與里程碑
+MVP 成功不是「5G 傳輸速率提升 XX%」，而是：相同負載能穩定重現；資料和配置可追溯；回答 RQ1–RQ3；對觀察到的變化提出有證據的解釋，並清楚限定適用範圍。
+ai-ran-perf/  README.md                   # prerequisites, commands, claims, limitations  configs/                    # versioned DU and workload configs  scripts/                    # run, collect, cleanup, validate  workloads/                  # stress-ng presets; tiny PyTorch scripts  analysis/                   # notebooks and plotting scripts  results/raw/                # raw perf, metrics, GPU logs by run_id  results/processed/          # cleaned datasets and figures  docs/hardware-inventory.md  # verified CPU/RAM/GPU/OS specs  docs/experiment-protocol.md # warmup, repeats, randomization  docs/report.md              # RQ1-RQ3 evidence and limitations
+第一天待辦（依序即可）
+① 在 Windows PowerShell 收集 CPU 核心、logical processors、GPU 型號/VRAM、RAM 與剩餘硬碟空間。
+② 確定是否能安全使用 Ubuntu bare metal（或先做 WSL2 功能驗證，不作 final PMU claim）。
+③ 在 Linux 執行 lscpu、perf list、perf stat 的 5 秒 smoke test。
+④ 固定 OCUDU 的 release/tag；跑出 1 UE、最小可行 DU baseline，確認 executor metrics 非空。
+⑤ 只跑 S0 與 S1 各 3–5 次，先畫出第一張有原始數據的圖。
+參考資料與官方文件（2026-10-30 查核）
+[R1] Kamalzadeh et al., “PRO-RAN: Processor-Level Characterization of Open RAN Centralized and Distributed Units,” arXiv, 2026.  https://arxiv.org/abs/2608.26498
+[R2] Jeong et al., “Deep reinforced traffic-aware CPU allocation in centralized RAN,” Scientific Reports, 2025.  https://www.nature.com/articles/s41598-025-05425-y
+[R3] Jung et al., “A 5G Testbed for AI-and-RAN on AI Edge: Design and Performance Evaluation,” ICUFN, 2026.  https://doi.org/10.1109/ICUFN69619.2026.11628529
+[D1] OCUDU, Load testing without radio hardware.  https://docs.ocudu.org/tutorials/testmode/
+[D2] OCUDU, Output and Executor metrics reference.  https://docs.ocudu.org/user_manual/outputs/
+[D3] srsRAN / OCUDU official project transition.  https://www.srsran.com/press_releases/srsran_becomes_ocudu/
+[D4] Linux Kernel, Perf events and tool security.  https://docs.kernel.org/admin-guide/perf-security.html
+[D5] PyTorch, DataLoader and CPU threads.  https://docs.pytorch.org/docs/stable/data.html
+[D6] Microsoft, Windows performance counter profiling limitations.  https://learn.microsoft.com/en-us/windows/win32/perfctrs/about-performance-counters
