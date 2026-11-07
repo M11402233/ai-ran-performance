@@ -19,6 +19,7 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
 from perf_cache import preflight, start_perf, finish_perf
+from study_layout import load_layout_plan, required_cpus, validate_du_roles
 from study_metrics import baseline_gate, dump, fingerprint, PRIORITY_FAILURE, read_run
 
 
@@ -33,7 +34,39 @@ def stop(process):
         process.wait()
 
 
-def thread_snapshot(pid, allowed, require_rt=False, require_other=False):
+def decoder_active(log):
+    """Require actual work in the latest reported decoder interval."""
+    records = re.findall(r'Executor metrics "pusch_dec_exec": ([^\n]*)', log)
+    if not records:
+        return False
+    values = dict(re.findall(r'(nof_executes|nof_defers)=(\d+)', records[-1]))
+    return sum(int(values.get(key, 0)) for key in ('nof_executes', 'nof_defers')) > 0
+
+
+def check_sample_time(expected_epoch, expected_monotonic, actual_epoch, actual_monotonic):
+    """Reject skipped bins and clock changes instead of inventing catch-up samples."""
+    lateness = actual_monotonic - expected_monotonic
+    if not expected_epoch <= actual_epoch < expected_epoch + 1 or not 0 <= lateness < 1:
+        raise RuntimeError(f'Thread audit missed second {expected_epoch}: wall={actual_epoch:.6f}, '
+                           f'monotonic lateness={lateness:.6f}s; no catch-up samples')
+
+
+def diagnostic_state():
+    paths = {'cpu_stat': '/proc/stat', 'cpu_pressure': '/proc/pressure/cpu', 'io_pressure': '/proc/pressure/io',
+             'memory_pressure': '/proc/pressure/memory', 'observer_io': '/proc/self/io',
+             'observer_schedstat': '/proc/self/schedstat',
+             'rt_runtime_us': '/proc/sys/kernel/sched_rt_runtime_us',
+             'rt_period_us': '/proc/sys/kernel/sched_rt_period_us'}
+    result = {'epoch': time.time(), 'monotonic': time.monotonic()}
+    for name, path in paths.items():
+        try:
+            result[name] = Path(path).read_text()
+        except OSError as exc:
+            result[name] = str(exc)
+    return result
+
+
+def thread_snapshot(pid, allowed, require_rt=False, require_other=False, roles=None):
     rows = []
     for task in sorted((Path('/proc') / str(pid) / 'task').iterdir()):
         try:
@@ -58,15 +91,17 @@ def thread_snapshot(pid, allowed, require_rt=False, require_other=False):
         pool_workers = [r for r in rows if r['name'].startswith('main_pool#')]
         if len(pool_workers) != 3:
             raise RuntimeError(f'Expected 3 actual main_pool workers, observed {len(pool_workers)}; CPU-mask worker cap may override nof_threads')
+    if roles is not None:
+        validate_du_roles(rows, roles)
     return rows
 
 
-def check_host(collector):
+def check_host(collector, required=None):
     status = Path('/proc/self/status').read_text()
     if re.search(r'^NoNewPrivs:\s+1$', status, re.M):
         raise SystemExit('NoNewPrivs=1: run this command in an ordinary host terminal with sudo or a CAP_SYS_NICE gNB. No runs started.')
-    if not set(range(8)) <= os.sched_getaffinity(0):
-        raise SystemExit('This protocol requires available vCPUs 0–7.')
+    if not (set(range(8)) if required is None else set(required)) <= os.sched_getaffinity(0):
+        raise SystemExit('CPU plan uses unavailable CPUs; inspect affinity/cpuset before measuring.')
     if collector == 'perf':
         if Path('/proc/sys/kernel/perf_event_paranoid').read_text().strip() != '1':
             raise SystemExit('Protocol requires temporary perf_event_paranoid=1. Use scripts/host_study.sh.')
@@ -79,35 +114,48 @@ def context(a):
     cpu = next((line for line in Path('/proc/cpuinfo').read_text().splitlines() if line.startswith('model name')), '')
     return {'fingerprint': fingerprint([ROOT / 'bin/gnb', ROOT / a.config, ROOT / 'configs/pucch-small.yml',
                                        Path(__file__), ROOT / 'scripts/study_metrics.py', ROOT / 'scripts/perf_cache.py',
-                                       ROOT / 'workloads/dqn_train.py']),
+                                       ROOT / 'workloads/dqn_train.py', ROOT / 'scripts/study_layout.py'] +
+                                      ([ROOT / a.layout_plan] if a.layout_plan else [])),
             'config': a.config, 'warmup': a.warmup, 'sample': a.sample, 'collector': a.collector,
             'effect_pct': a.effect_pct, 'max_rt_per_second': a.max_rt_per_second,
             'kernel': platform.release(), 'hostname': platform.node(), 'cpu': cpu,
             'boot_id': Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
             'available_cpus': sorted(os.sched_getaffinity(0)), 'uid': os.geteuid(),
-            'main_pool_threads': 3, 'seed': a.seed,
+            'main_pool_threads': 3, 'seed': a.seed, 'thread_audit_version': 3,
+            'cpu_layout_plan': a.cpu_layout_plan,
             'paranoid': Path('/proc/sys/kernel/perf_event_paranoid').read_text().strip()}
+
+
+def render_config(source, log_path, roles):
+    cfg = source.replace('results/raw/gnb.log', str(log_path))
+    if 'expert_execution:' in cfg:
+        raise RuntimeError('Study config must not already contain expert_execution; use supplied du-reduced.yml')
+    pool_text = ','.join(map(str, roles['main_pool_cpus']))
+    ru_text = ','.join(map(str, roles['ru_cpus']))
+    cfg += f'\nexpert_execution:\n  affinities:\n    main_pool_cpus: "{pool_text}"\n    main_pool_pinning: mask\n  cell_affinities:\n    - ru_cpus: "{ru_text}"\n      ru_pinning: mask\n  threads:\n    main_pool:\n      nof_threads: 3\n'
+    return cfg
 
 
 def run_one(base, index, layout, threads, repeat, a):
     folder = base / f'{index:02d}-{layout}-DQN{threads}-{repeat}'
     folder.mkdir()
-    du_mask = list(range(8 if layout == 'shared' else 4))
-    ai_mask = list(range(8)) if layout == 'shared' else list(range(4, 8))
+    roles = a.cpu_layout_plan['layouts'][layout]
+    du_mask, ai_mask = roles['du_cpus'], roles['dqn_cpus']
+    role_audit = roles if a.layout_plan else None
     mask_text = ','.join(map(str, du_mask))
-    cfg = (ROOT / a.config).read_text().replace('results/raw/gnb.log', str(folder / 'gnb.log'))
-    if 'expert_execution:' in cfg:
-        raise RuntimeError('Study config must not already contain expert_execution; use supplied du-reduced.yml')
-    cfg += f'\nexpert_execution:\n  affinities:\n    main_pool_cpus: "{mask_text}"\n    main_pool_pinning: mask\n  cell_affinities:\n    - ru_cpus: "{mask_text}"\n      ru_pinning: mask\n  threads:\n    main_pool:\n      nof_threads: 3\n'
+    cfg = render_config((ROOT / a.config).read_text(), folder / 'gnb.log', roles)
     (folder / 'config.yml').write_text(cfg)
     meta = {'layout': layout, 'threads': threads, 'repeat': repeat, 'status': 'starting',
             'warmup': a.warmup, 'sample': a.sample, 'du_cpus': du_mask, 'dqn_cpus': ai_mask,
-            'collector': a.collector, 'affinity_verified': False, 'rt_verified': False}
+            'collector': a.collector, 'affinity_verified': False, 'rt_verified': False,
+            'main_pool_threads': 3, 'thread_audit_required': True,
+            'cpu_roles': roles if a.layout_plan else None}
     du = ai = perf = None
     handles = []
     interrupted = False
     print(f'Attempt {index + 1}: {folder.name}', flush=True)
     try:
+        dump(folder / 'diagnostics-before.json', diagnostic_state())
         out = (folder / 'stdout.txt').open('w'); handles.append(out)
         du = subprocess.Popen(['taskset', '-c', mask_text, str(ROOT / 'bin/gnb'), '-c', str(folder / 'config.yml'),
                                '-c', str(ROOT / 'configs/pucch-small.yml')], stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.PIPE)
@@ -118,12 +166,13 @@ def run_one(base, index, layout, threads, repeat, a):
             log = (folder / 'gnb.log').read_text(errors='replace') if (folder / 'gnb.log').exists() else ''
             if PRIORITY_FAILURE.search(log + (folder / 'stdout.txt').read_text(errors='replace')):
                 raise RuntimeError('gNB RT priority permission failed')
-            if re.search(r'"pusch_dec_exec": nof_executes=\d+ nof_defers=[1-9]\d*', log):
+            if decoder_active(log):
                 break
             time.sleep(.25)
         else:
+            dump(folder / 'startup-threads.json', thread_snapshot(du.pid, du_mask, require_rt=True, roles=role_audit))
             raise RuntimeError('No active decoder within 30 seconds')
-        thread_snapshot(du.pid, du_mask, require_rt=True)
+        meta['startup_threads'] = thread_snapshot(du.pid, du_mask, require_rt=True, roles=role_audit)
         if threads:
             aiout = (folder / 'dqn.stdout').open('w'); handles.append(aiout)
             ai = subprocess.Popen(['taskset', '-c', ','.join(map(str, ai_mask)), sys.executable,
@@ -144,26 +193,47 @@ def run_one(base, index, layout, threads, repeat, a):
                 raise RuntimeError('DU/DQN exited during warmup')
             time.sleep(min(.25, max(0, deadline - time.monotonic())))
         start = math.ceil(time.time())
-        time.sleep(max(0, start - time.time()))
+        start_monotonic = time.monotonic() + start - time.time()
+        time.sleep(max(0, start_monotonic - time.monotonic()))
+        meta['sample_start_monotonic'] = start_monotonic
         meta['sample_start_epoch'] = start
         end = start + a.sample
         # Exact log window is independent of the small perf startup overhead.
         if a.collector == 'perf':
             perf = start_perf(du.pid, a.sample, folder / 'perf.csv')
         for second in range(a.sample):
+            expected_epoch, expected_monotonic = start + second, start_monotonic + second
+            time.sleep(max(0, expected_monotonic - time.monotonic()))
+            actual_epoch, actual_monotonic = time.time(), time.monotonic()
+            meta['last_sample_timing'] = {'expected_epoch': expected_epoch, 'actual_epoch': actual_epoch,
+                                          'monotonic_lateness_seconds': actual_monotonic - expected_monotonic}
+            check_sample_time(expected_epoch, expected_monotonic, actual_epoch, actual_monotonic)
             if du.poll() is not None or (ai is not None and ai.poll() is not None):
                 raise RuntimeError('DU/DQN exited during sample')
             if perf is not None and perf.poll() not in (None, 0):
                 raise RuntimeError('perf attach/counter failure')
-            snapshot = {'epoch': time.time(), 'du': thread_snapshot(du.pid, du_mask, require_rt=True),
+            snapshot = {'epoch': actual_epoch, 'monotonic': actual_monotonic,
+                        'scheduled_epoch': expected_epoch,
+                        'du': thread_snapshot(du.pid, du_mask, require_rt=True, roles=role_audit),
                         'cpu': Path('/proc/stat').read_text().splitlines()[0]}
             if ai is not None:
                 snapshot['dqn'] = thread_snapshot(ai.pid, ai_mask, require_other=True)
+            snapshot['observer'] = {'cpus': sorted(os.sched_getaffinity(0)),
+                                    'policy': os.sched_getscheduler(0)}
+            if roles['observer_cpus'] and snapshot['observer'] != {
+                    'cpus': roles['observer_cpus'], 'policy': os.SCHED_OTHER}:
+                raise RuntimeError('Observer affinity/policy mismatch')
+            snapshot['diagnostics'] = diagnostic_state()
+            snapshot['completed_epoch'] = time.time()
+            snapshot['completed_monotonic'] = time.monotonic()
+            check_sample_time(expected_epoch, expected_monotonic,
+                              snapshot['completed_epoch'], snapshot['completed_monotonic'])
             with (folder / 'threads.jsonl').open('a') as f:
                 f.write(json.dumps(snapshot) + '\n')
-            time.sleep(max(0, start + second + 1 - time.time()))
+            time.sleep(max(0, start_monotonic + second + 1 - time.monotonic()))
         meta['sample_end_epoch'] = end
-        if abs(time.time() - end) > 1.0:
+        meta['sample_end_monotonic'] = time.monotonic()
+        if abs(time.time() - end) > 1.0 or abs(time.monotonic() - (start_monotonic + a.sample)) > 1.0:
             raise RuntimeError('Sampling deadline overrun >1 second')
         meta['affinity_verified'] = meta['rt_verified'] = True
         if perf is not None:
@@ -189,6 +259,7 @@ def run_one(base, index, layout, threads, repeat, a):
     finally:
         if 'sample_start_epoch' in meta and 'sample_end_epoch' not in meta:
             meta['sample_end_epoch'] = min(meta['sample_start_epoch'] + a.sample, math.floor(time.time()))
+        dump(folder / 'diagnostics-after.json', diagnostic_state())
         for process in (perf, ai, du):
             stop(process)
         meta['returncodes'] = {name: process.returncode for name, process in [('du', du), ('dqn', ai), ('perf', perf)] if process is not None}
@@ -211,6 +282,7 @@ def main():
     p.add_argument('--layout', choices=['shared', 'split'], default='shared', help='baseline layout')
     p.add_argument('--collector', choices=['perf', 'proc'], default='perf')
     p.add_argument('--config', default='configs/du-reduced.yml')
+    p.add_argument('--layout-plan', type=Path, help='CSV role plan; omitted retains legacy masks')
     p.add_argument('--warmup', type=int, default=30)
     p.add_argument('--sample', type=int, default=60)
     p.add_argument('--repeats', type=int, default=5, help='matrix repetitions; baseline is always ten')
@@ -222,8 +294,17 @@ def main():
     a = p.parse_args()
     if a.warmup < 0 or a.sample < 10 or a.repeats < 1 or not 0 < a.effect_pct <= 100 or a.max_rt_per_second < 0:
         p.error('require warmup>=0, sample>=10, repeats>=1, 0<effect<=100, RT ceiling>=0')
-    check_host(a.collector)
+    try:
+        a.cpu_layout_plan = load_layout_plan(a.layout_plan)
+    except (ValueError, OSError) as exc:
+        p.error(str(exc))
+    check_host(a.collector, required_cpus(a.cpu_layout_plan))
     ctx = context(a)
+    observer = a.cpu_layout_plan['layouts']['shared']['observer_cpus']
+    if observer:
+        if os.sched_getscheduler(0) != os.SCHED_OTHER:
+            raise SystemExit('Observer must run SCHED_OTHER')
+        os.sched_setaffinity(0, observer)
     if a.phase == 'matrix':
         if importlib.util.find_spec('torch') is None:
             raise SystemExit('PyTorch missing; install requirements-study.txt in the host venv first.')

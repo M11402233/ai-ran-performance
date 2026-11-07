@@ -7,6 +7,7 @@ import math
 from pathlib import Path
 import re
 import statistics
+from study_layout import validate_du_roles
 
 METRIC = re.compile(r'Executor metrics "pusch_dec_exec": (.*)')
 PRIORITY_FAILURE = re.compile(r'Scheduling priority.*not changed|not enough privileges|failed to.*(?:priority|sched)', re.I)
@@ -22,6 +23,55 @@ def fingerprint(paths):
         h.update(Path(path).name.encode())
         h.update(Path(path).read_bytes())
     return h.hexdigest()
+
+
+def audit_threads(folder, meta):
+    """Check recorded evidence, rather than only trusting verified booleans."""
+    source = folder / 'threads.jsonl'
+    start, end = meta.get('sample_start_epoch'), meta.get('sample_end_epoch')
+    if not source.exists() or start is None or end is None:
+        return False
+    expected = set(range(int(start), int(end)))
+    seen = set()
+    roles = meta.get('cpu_roles')
+    du_mask = set(roles['du_cpus']) if roles else set(range(8 if meta['layout'] == 'shared' else 4))
+    ai_mask = set(roles['dqn_cpus']) if roles else (set(range(8)) if meta['layout'] == 'shared' else set(range(4, 8)))
+    for line in source.read_text().splitlines():
+        record = json.loads(line)
+        second = int(record['epoch'])
+        if second not in expected:
+            continue
+        if second in seen:
+            return False
+        du = record.get('du', [])
+        if roles:
+            try:
+                validate_du_roles(du, roles)
+            except RuntimeError:
+                return False
+            if record.get('observer') != {'cpus': roles['observer_cpus'], 'policy': 0}:
+                return False
+        pool = [r for r in du if r.get('name', '').startswith('main_pool#')]
+        if meta.get('main_pool_threads') is not None and (
+                len(pool) != meta['main_pool_threads'] or
+                any(r['policy'] not in [1, 2] or r['rt_priority'] <= 0 for r in pool)):
+            return False
+        if meta.get('thread_audit_required') and (
+                record.get('scheduled_epoch') != second or
+                not record['epoch'] <= record.get('completed_epoch', float('inf')) < second + 1):
+            return False
+        if not du or any(not r['cpus'] or not set(r['cpus']) <= du_mask for r in du):
+            return False
+        if not any(r['policy'] in [1, 2] and r['rt_priority'] > 0 and
+                   ('main_pool' in r['name'] or 'ru_dummy' in r['name']) for r in du):
+            return False
+        if meta['threads']:
+            ai = record.get('dqn', [])
+            if not ai or any(not r['cpus'] or not set(r['cpus']) <= ai_mask or r['policy'] != 0 for r in ai):
+                return False
+        seen.add(second)
+    return bool(expected) and seen == expected
+
 
 
 def read_run(folder):
@@ -77,6 +127,8 @@ def read_run(folder):
             dqn = [dict(r) for r in csv.DictReader(f) if start <= int(r['epoch_second']) < end and r['full_second'] == '1']
     if meta.get('threads', 0) and (len(dqn) != len(seconds) or {int(r['epoch_second']) for r in dqn} != {s['epoch_second'] for s in seconds}):
         reasons.append('missing full-second DQN throughput')
+    if meta.get('thread_audit_required') and not audit_threads(folder, meta):
+        reasons.append('missing or inconsistent per-second affinity/RT policy evidence')
     result = {'run': folder.name, 'layout': meta['layout'], 'threads': meta['threads'],
               'valid': not reasons, 'invalid_reason': '; '.join(reasons), 'decoder_intervals': len(intervals),
               'rt_failure_messages': sum(v['rt_failure_messages'] for v in seconds),

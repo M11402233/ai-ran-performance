@@ -1,5 +1,5 @@
 criterion,passed,evidence
 至少一組具有可重現性的 DU-only baseline,False,0 batches passed the unchanged ten-attempt baseline gate and recorded thread audit.
-有效的 DU 工作負載及量測紀錄,True,"19 evidence-verified runs; decoder activity, complete interval logs, per-second CPU affinity and RT policy audited."
+有效的 DU 工作負載及量測紀錄,True,"17 evidence-verified runs; decoder activity, complete interval logs, per-second CPU affinity and RT policy audited."
 完成 shared / split CPU 資源配置比較,False,"Requires both matching baseline gates, all 40 matrix attempts, valid S0 controls, and >=3 repeat-matched valid pairs at each DQN thread level. Invalid fractions remain reported."
 有一張能解釋觀察結果與限制的圖,True,"overview.png plus caption.md; valid/invalid counts, baseline gate, paired observations, metric and VM limitations."

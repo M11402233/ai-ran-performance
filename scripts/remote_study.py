@@ -32,10 +32,16 @@ def main():
     os.chdir(ROOT)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', default='configs/du-reduced.yml')
+    parser.add_argument('--layout-plan', type=Path)
     args = parser.parse_args()
     if not (ROOT / args.config).is_file():
         raise SystemExit('Study configuration does not exist.')
-    session_plan = {**PLAN, 'config': args.config}
+    from study_layout import load_layout_plan
+    cpu_plan = load_layout_plan(args.layout_plan)
+    session_plan = {**PLAN, 'config': args.config, 'thread_audit_version': 3,
+                    'cpu_layout_plan': cpu_plan,
+                    'startup_timeout_seconds': 30, 'main_pool_threads': 3,
+                    'sampling_clock': 'monotonic deadlines with complete wall-second evidence; no catch-up'}
     def interrupted(*_):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, interrupted)
@@ -60,6 +66,8 @@ def main():
     def stage(phase, ceiling, layout=None, baselines=None):
         command = [sys.executable, str(ROOT / 'scripts/run_study.py'), phase, '--collector', 'perf',
                    '--config', args.config, '--effect-pct', '20', '--warmup', '30', '--sample', '60', '--max-rt-per-second', str(ceiling)]
+        if args.layout_plan:
+            command.extend(['--layout-plan', str(args.layout_plan)])
         if layout:
             command.extend(['--layout', layout])
         if baselines:

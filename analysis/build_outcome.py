@@ -13,7 +13,7 @@ import sys
 import textwrap
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
-from study_metrics import baseline_gate, read_run
+from study_metrics import baseline_gate, read_run, audit_threads
 
 
 def save_csv(path, rows):
@@ -23,35 +23,6 @@ def save_csv(path, rows):
     with path.open('w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=keys)
         writer.writeheader(); writer.writerows(rows)
-
-
-def audit_threads(folder, meta):
-    """Check recorded evidence, rather than only trusting verified booleans."""
-    source = folder / 'threads.jsonl'
-    start, end = meta.get('sample_start_epoch'), meta.get('sample_end_epoch')
-    if not source.exists() or start is None or end is None:
-        return False
-    expected = set(range(int(start), int(end)))
-    seen = set()
-    du_mask = set(range(8 if meta['layout'] == 'shared' else 4))
-    ai_mask = set(range(8)) if meta['layout'] == 'shared' else set(range(4, 8))
-    for line in source.read_text().splitlines():
-        record = json.loads(line)
-        second = int(record['epoch'])
-        if second not in expected:
-            continue
-        du = record.get('du', [])
-        if not du or any(not r['cpus'] or not set(r['cpus']) <= du_mask for r in du):
-            return False
-        if not any(r['policy'] in [1, 2] and r['rt_priority'] > 0 and
-                   ('main_pool' in r['name'] or 'ru_dummy' in r['name']) for r in du):
-            return False
-        if meta['threads']:
-            ai = record.get('dqn', [])
-            if not ai or any(not r['cpus'] or not set(r['cpus']) <= ai_mask or r['policy'] != 0 for r in ai):
-                return False
-        seen.add(second)
-    return bool(expected) and seen == expected
 
 
 def collect(session):

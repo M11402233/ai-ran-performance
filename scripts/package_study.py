@@ -35,10 +35,10 @@ if not a.no_analysis:
             (a.out.parent / 'analysis-errors.md').write_text('# Acceptance analysis errors\n\n' + '\n'.join(errors) + '\n')
         elif (a.out.parent / 'analysis-errors.md').exists():
             (a.out.parent / 'analysis-errors.md').unlink()
-files = [ROOT / 'README.md', ROOT / 'requirements-study.txt']
+files = [ROOT / 'README.md', ROOT / 'requirements-study.txt', ROOT / 'GPU_HANDOFF_PLAN.md']
 for directory in ['scripts', 'analysis', 'workloads', 'configs', 'tests', 'bin', 'docs']:
     files.extend(path for path in (ROOT / directory).rglob('*') if path.is_file() and '__pycache__' not in path.parts
-                 and path.suffix in {'.py', '.sh', '.yml', '.md', '.txt', '.patch', ''})
+                 and path.suffix in {'.py', '.sh', '.yml', '.csv', '.md', '.txt', '.patch', ''})
 for directory in processed.glob('*'):
     if directory.is_dir() and directory.name.startswith(('baseline-shared-', 'baseline-split-', 'matrix-', 'remote-session-')):
         files.extend(path for path in directory.rglob('*') if path.is_file() and path.suffix in {'.csv', '.png', '.md'})
