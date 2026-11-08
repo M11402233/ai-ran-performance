@@ -3,6 +3,8 @@ import csv
 from pathlib import Path
 
 ROLES = ('du_cpus', 'main_pool_cpus', 'ru_cpus', 'dqn_cpus', 'observer_cpus')
+# v4 adds explicit housekeeping/spare columns; v3 CSVs keep loading unchanged.
+V4_ROLES = ROLES + ('spare_cpus', 'housekeeping_cpus')
 
 
 def load_layout_plan(path=None):
@@ -17,15 +19,20 @@ def load_layout_plan(path=None):
     path = Path(path)
     with path.open(newline='') as handle:
         reader = csv.DictReader(handle)
-        if set(reader.fieldnames or []) != {'layout', *ROLES}:
-            raise ValueError('CPU plan needs layout and all five CPU role columns')
+        fields = set(reader.fieldnames or [])
+        if fields == {'layout', *ROLES}:
+            columns = ROLES
+        elif fields == {'layout', *V4_ROLES}:
+            columns = V4_ROLES
+        else:
+            raise ValueError('CPU plan needs layout and all five (v3) or seven (v4) CPU role columns')
         layouts = {}
         for row in reader:
             name = row['layout']
             if name not in ('shared', 'split') or name in layouts:
                 raise ValueError('CPU plan needs exactly one shared and one split row')
             roles = {}
-            for role in ROLES:
+            for role in columns:
                 values = [int(v.strip()) for v in row[role].split(',')]
                 if not values or min(values) < 0 or len(set(values)) != len(values):
                     raise ValueError(f'{name}: empty, duplicate or negative {role}')
@@ -46,7 +53,28 @@ def load_layout_plan(path=None):
         raise ValueError('Observer CPUs must match across layouts')
     if layouts['shared']['ru_cpus'] != layouts['split']['ru_cpus']:
         raise ValueError('RU CPUs must match across layouts')
-    return {'name': path.stem, 'layouts': layouts}
+    if columns == V4_ROLES:
+        validate_v4(layouts)
+    return {'name': path.stem, 'layouts': layouts, 'version': 4 if columns == V4_ROLES else 3}
+
+
+def validate_v4(layouts):
+    """v4: identical DU in both layouts, only AI placement differs."""
+    for name, roles in layouts.items():
+        du, pool, ru, ai, observer, spare, house = (set(roles[k]) for k in V4_ROLES)
+        if spare != du - pool - ru:
+            raise ValueError(f'{name}: spare_cpus must be exactly DU CPUs without RU/main-pool RT threads')
+        if not house or house & du or not observer <= house:
+            raise ValueError(f'{name}: housekeeping CPUs must be outside DU and contain the observer')
+        if ai & house:
+            raise ValueError(f'{name}: AI must not use housekeeping CPUs')
+        if ai & (ru | spare):
+            raise ValueError(f'{name}: AI may only overlap main-pool CPUs, never RU or spare CPUs')
+    for key in ('du_cpus', 'main_pool_cpus', 'ru_cpus', 'spare_cpus', 'housekeeping_cpus'):
+        if layouts['shared'][key] != layouts['split'][key]:
+            raise ValueError(f'v4: {key} must be identical across layouts; only AI placement may differ')
+    if len(layouts['shared']['dqn_cpus']) != len(layouts['split']['dqn_cpus']):
+        raise ValueError('v4: AI CPU count must match across layouts')
 
 
 def required_cpus(plan):

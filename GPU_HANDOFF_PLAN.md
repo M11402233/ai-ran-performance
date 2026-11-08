@@ -122,9 +122,17 @@ UL-only 沒有解決穩定 gate，不能宣稱減少 DL 即可穩定。新主機
 
 ### 3.7 v3 腳本已準備（尚未正式重測）
 
+**新機改用 v4**：[baseline-v4.md](docs/baseline-v4.md)、`configs/cpu-layout-v4.csv`、`scripts/start_baseline_v4.sh`。兩組 DU 配置相同，只改 AI 位置；共 35 項測試通過。
+
 新增 `configs/cpu-layout-v3.csv` 與 `scripts/study_layout.py`，資源配置已外部化；詳見 `docs/baseline-v3.md`。RU=0、observer=6–7；shared main pool=1–5、split=1–3，兩組均三 workers。程式已通過 22 項測試與非 RT mask smoke，不能當成 RT gate 通過。
 
 新機先檢查這份 CSV 是否符合實際 topology／cpuset，不照搬 logical CPU 編號；下方舊「硬編碼」說明指未提供 plan 的 legacy 模式。
+
+### 3.8 v3 最終結果與 source package（2026-11-08 補記）
+
+v3 正式量測已完成：remote-session-20261107T222535Z，兩組 gate FAIL。shared 10/10、split 9/10 有效；shared 平均延遲摘要 CV=2.01%，另外兩項最大延遲摘要 CV=21.81%/31.10%，RT 峰值仍超標；split 有一次約 8.074 秒漏採。詳見 docs/hardware-handoff-20261108.md。前節「尚未重測」是準備時快照，已由本節更新。
+
+若接手的是 source package，先讀 START_HERE.md：包內 third_party/srsRAN_Project 已含 worker patch 與既有 E2/KPM 變更，不要重複套 patch。FlexRIC 來源亦附在包內，但依賴套件、driver、PyTorch、CUDA 不在包內。保留 SOURCE_PROVENANCE.md，不把移除 .git 的來源當成已驗證純 upstream release。
 
 ## 4. 新 GPU 主機的環境決策
 

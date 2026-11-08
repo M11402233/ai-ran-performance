@@ -2,7 +2,7 @@
 
 本專案研究 srsRAN DU 與 AI 工作共用一台主機時的效能干擾，並評估 CPU 分核、AI concurrency 限制及後續 CUDA offload 的代價。使用 dummy RU／test UE 產生合成 DU 工作負載，先驗證 DU-only baseline，再執行 AI 共置比較。
 
-**最新狀態（2026-11-07）：UL-only v2 已結束，20 次中 17 次量測有效，但 shared／split 兩組 baseline 都未通過；尚未執行正式 DQN 矩陣或 CUDA 實驗。驗收為 2／4 通過。**
+**最新狀態（2026-11-08 更新）：UL-only v3 已結束，20 次中 19 次量測有效，shared／split baseline 仍均未通過；尚無正式 DQN 矩陣或 CUDA 實驗。驗收為 2／4 通過。**
 
 新機器的環境安裝、CUDA 實作與研究交接見 [GPU_HANDOFF_PLAN.md](GPU_HANDOFF_PLAN.md)。該文件是後續計畫，不代表 GPU／FlexRIC 閉環已完成。
 
@@ -31,14 +31,14 @@
 | 11/7：修正版 UL+DL | 兩組各 10 次，實際三 workers | 最終稽核有效 9/10、7/10；gate 均 FAIL，未進 DQN |
 | 11/7：採集器 v2 | monotonic 排程、禁止漏秒補採、runtime／收尾共用 audit | 新增診斷紀錄與回歸測試；17 項測試通過 |
 | 11/7：UL-only v2 | PUSCH 開、PDSCH 關，兩組各 10 次 | 有效 9/10、8/10；gate 均 FAIL，未進 DQN；本輪已收尾 |
-| 待重測：baseline v3 | RU 固定 CPU 0、observer 固定 6–7、main pool 分離 | 22 項測試及非 RT affinity smoke 通過，正式 baseline 待執行 |
+| 11/7：baseline v3 | RU 固定 CPU 0、observer 固定 6–7、main pool 分離 | 有效 10/10、9/10；shared CV/RT 未過，split 有 8.07 秒漏採；gate 均 FAIL |
 | 待執行：新主機 CPU／CUDA | 新主機 baseline、同機 CPU／CUDA AI 對照、後續 FlexRIC | 仍屬計畫；CUDA runner 與 GPU metadata／分析尚待實作 |
 
 歷史報告：[初期試跑](docs/report.md)、[原版 baseline 排查](docs/baseline-diagnosis-20261031.md)、[worker 修正](docs/worker-fix-20261102.md)、[採集器 v2 與 UL-only 協定](docs/next-round-ul-v2.md)。歷史文件的「尚未量測／無 PMU」敘述保留當時狀態，最新進度以本 README 與指定批次紀錄為準。
 
-## 待重測：baseline v3
+## Baseline v3：已完成且未通過
 
-已新增 [v3 資源配置協定](docs/baseline-v3.md)，測試將 RU timing 與採集器分離是否減少競爭。這不是已通過的新結果：正式 RT baseline 尚未執行。
+已依 [v3 資源配置協定](docs/baseline-v3.md) 完成正式重測，有效 19/20，但兩組 gate 仍未通過；最新分析與硬體接手順序見 [硬體交接摘要](docs/hardware-handoff-20261108.md)。
 
 | 角色 | shared | split |
 |---|---|---|
@@ -47,7 +47,9 @@
 | observer | CPU 6–7 | CPU 6–7 |
 | gate 通過後的 AI | CPU 1–5 | CPU 4–5 |
 
-配置檔：[cpu-layout-v3.csv](configs/cpu-layout-v3.csv)。22 項測試通過；兩配置真實程序的非 RT worker／affinity smoke 通過。仍需一般 SSH 具權限的實測確認，CV、RT、啟動與有效性門檻維持原規則。
+**新機改用 v4**：[baseline-v4.md](docs/baseline-v4.md)、`configs/cpu-layout-v4.csv`、`scripts/start_baseline_v4.sh`。兩組 DU 配置相同，只改 AI 位置；共 35 項測試通過。
+
+配置檔：[cpu-layout-v3.csv](configs/cpu-layout-v3.csv)。22 項測試與非 RT affinity smoke 通過；正式重測也已完成。shared 10/10、split 9/10 有效，shared 延遲尖峰 CV 與 RT 未過，split 仍有約 8.07 秒採集停頓。CV／RT 門檻維持原規則。
 
 ```bash
 cd ~/ai-ran-performance
@@ -56,7 +58,7 @@ sudo bash scripts/start_baseline_v3.sh
 
 此輪與 v2 的資源配置不同，必須重新跑兩組各十次 baseline；不能拿舊批資料解鎖。
 
-## 最新一輪結果：UL-only v2
+## 前一輪結果：UL-only v2
 
 Session：`remote-session-20261107T212225Z`；狀態：`stopped`，原因是 baseline gate 未通過，並非矩陣完成。`perf_event_paranoid` 已由流程恢復原值。
 

@@ -23,6 +23,30 @@ from study_layout import load_layout_plan, required_cpus, validate_du_roles
 from study_metrics import baseline_gate, dump, fingerprint, PRIORITY_FAILURE, read_run
 
 
+STARTUP_REPLACEMENT_CAP = 3
+
+
+class StartupFailure(RuntimeError):
+    """DU never reached active PHY: no sample has been observed yet."""
+
+
+def irq_state():
+    """Interrupt/softirq placement, before and after each run (not per second)."""
+    result = {}
+    for name in ('interrupts', 'softirqs'):
+        try:
+            result[name] = Path('/proc', name).read_text()
+        except OSError as exc:
+            result[name] = str(exc)
+    return result
+
+
+def task_ticks(task):
+    """utime+stime clock ticks; a per-second delta near CLK_TCK means a busy-polling thread."""
+    fields = (task / 'stat').read_text().rsplit(')', 1)[1].split()
+    return int(fields[11]) + int(fields[12])
+
+
 def stop(process):
     if process is None or process.poll() is not None:
         return
@@ -75,13 +99,15 @@ def thread_snapshot(pid, allowed, require_rt=False, require_other=False, roles=N
             policy = os.sched_getscheduler(tid)
             priority = os.sched_getparam(tid).sched_priority
             name = (task / 'comm').read_text().strip()
-        except ProcessLookupError:
+            ticks = task_ticks(task)
+        except (ProcessLookupError, FileNotFoundError):
             continue
         if not set(mask) <= set(allowed):
             raise RuntimeError(f'{pid}/{tid} affinity {mask} escapes {allowed}')
         if require_other and policy != os.SCHED_OTHER:
             raise RuntimeError('DQN unexpectedly has non-normal scheduling policy')
-        rows.append({'tid': tid, 'name': name, 'cpus': mask, 'policy': policy, 'rt_priority': priority})
+        rows.append({'tid': tid, 'name': name, 'cpus': mask, 'policy': policy, 'rt_priority': priority,
+                     'cpu_ticks': ticks})
     if not rows:
         raise RuntimeError('No threads observed')
     if require_rt and not any(r['policy'] in (os.SCHED_FIFO, os.SCHED_RR) and r['rt_priority'] > 0 and
@@ -123,6 +149,8 @@ def context(a):
             'available_cpus': sorted(os.sched_getaffinity(0)), 'uid': os.geteuid(),
             'main_pool_threads': 3, 'seed': a.seed, 'thread_audit_version': 3,
             'cpu_layout_plan': a.cpu_layout_plan,
+            **({'gate_version': 4, 'startup_replacement_cap': STARTUP_REPLACEMENT_CAP}
+               if a.cpu_layout_plan.get('version', 3) >= 4 else {}),
             'paranoid': Path('/proc/sys/kernel/perf_event_paranoid').read_text().strip()}
 
 
@@ -155,14 +183,14 @@ def run_one(base, index, layout, threads, repeat, a):
     interrupted = False
     print(f'Attempt {index + 1}: {folder.name}', flush=True)
     try:
-        dump(folder / 'diagnostics-before.json', diagnostic_state())
+        dump(folder / 'diagnostics-before.json', {**diagnostic_state(), **irq_state()})
         out = (folder / 'stdout.txt').open('w'); handles.append(out)
         du = subprocess.Popen(['taskset', '-c', mask_text, str(ROOT / 'bin/gnb'), '-c', str(folder / 'config.yml'),
                                '-c', str(ROOT / 'configs/pucch-small.yml')], stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.PIPE)
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             if du.poll() is not None:
-                raise RuntimeError('DU exited before active PHY')
+                raise StartupFailure('DU exited before active PHY')
             log = (folder / 'gnb.log').read_text(errors='replace') if (folder / 'gnb.log').exists() else ''
             if PRIORITY_FAILURE.search(log + (folder / 'stdout.txt').read_text(errors='replace')):
                 raise RuntimeError('gNB RT priority permission failed')
@@ -171,7 +199,7 @@ def run_one(base, index, layout, threads, repeat, a):
             time.sleep(.25)
         else:
             dump(folder / 'startup-threads.json', thread_snapshot(du.pid, du_mask, require_rt=True, roles=role_audit))
-            raise RuntimeError('No active decoder within 30 seconds')
+            raise StartupFailure('No active decoder within 30 seconds')
         meta['startup_threads'] = thread_snapshot(du.pid, du_mask, require_rt=True, roles=role_audit)
         if threads:
             aiout = (folder / 'dqn.stdout').open('w'); handles.append(aiout)
@@ -254,12 +282,13 @@ def run_one(base, index, layout, threads, repeat, a):
         interrupted = True
         meta.update(status='aborted', error='interrupted; unattempted conditions remain in protocol')
     except Exception as exc:
-        meta.update(status='failed', error=str(exc))
+        meta.update(status='failed', error=str(exc),
+                    startup_failure=isinstance(exc, StartupFailure) and 'startup_threads' not in meta)
         print(f'  FAILED: {exc}', flush=True)
     finally:
         if 'sample_start_epoch' in meta and 'sample_end_epoch' not in meta:
             meta['sample_end_epoch'] = min(meta['sample_start_epoch'] + a.sample, math.floor(time.time()))
-        dump(folder / 'diagnostics-after.json', diagnostic_state())
+        dump(folder / 'diagnostics-after.json', {**diagnostic_state(), **irq_state()})
         for process in (perf, ai, du):
             stop(process)
         meta['returncodes'] = {name: process.returncode for name, process in [('du', du), ('dqn', ai), ('perf', perf)] if process is not None}
@@ -268,6 +297,7 @@ def run_one(base, index, layout, threads, repeat, a):
         dump(folder / 'run.json', meta)
     if interrupted:
         raise KeyboardInterrupt
+    return meta
 
 
 def main():
@@ -323,6 +353,10 @@ def main():
     base = ROOT / 'results/raw' / f'{a.phase}-{a.layout}-{dt.datetime.now(dt.timezone.utc):%Y%m%dT%H%M%S%fZ}'
     base.mkdir(parents=True)
     dump(base / 'protocol.json', {'phase': a.phase, 'layout': a.layout, 'context': ctx, 'schedule': schedule,
+                                 'startup_rule': ('v4: a launch that never reaches active PHY is recorded and '
+                                                  f'relaunched, at most {STARTUP_REPLACEMENT_CAP} times; '
+                                                  'failures after active PHY stay invalid')
+                                 if ctx.get('gate_version', 3) >= 4 else 'v3: every launch counts',
                                  'baselines': {'shared': str(a.baseline_shared), 'split': str(a.baseline_split)}})
     print(f'Results: {base}', flush=True)
     lock = (ROOT / 'results' / '.study.lock').open('w')
@@ -333,10 +367,18 @@ def main():
     control_failed = False
     was_interrupted = False
     try:
-        for index, (layout, threads, repeat) in enumerate(schedule):
-            run_one(base, index, layout, threads, repeat, a)
+        replacements = STARTUP_REPLACEMENT_CAP if a.phase == 'baseline' and ctx.get('gate_version', 3) >= 4 else 0
+        index = 0
+        for layout, threads, repeat in schedule:
+            while True:
+                meta = run_one(base, index, layout, threads, repeat, a)
+                index += 1
+                if not meta.get('startup_failure') or replacements == 0:
+                    break
+                replacements -= 1
+                print(f'  Startup failure recorded before sampling; relaunch ({replacements} replacements left).', flush=True)
             if a.phase == 'matrix' and threads == 0:
-                folder = base / f'{index:02d}-{layout}-DQN{threads}-{repeat}'
+                folder = base / f'{index - 1:02d}-{layout}-DQN{threads}-{repeat}'
                 control, _, seconds, _ = read_run(folder)
                 if not control['valid'] or any(s['rt_failure_messages'] > a.max_rt_per_second for s in seconds):
                     control_failed = True

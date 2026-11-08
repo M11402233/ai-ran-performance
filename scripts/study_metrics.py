@@ -130,6 +130,7 @@ def read_run(folder):
     if meta.get('thread_audit_required') and not audit_threads(folder, meta):
         reasons.append('missing or inconsistent per-second affinity/RT policy evidence')
     result = {'run': folder.name, 'layout': meta['layout'], 'threads': meta['threads'],
+              'startup_failure': bool(meta.get('startup_failure')),
               'valid': not reasons, 'invalid_reason': '; '.join(reasons), 'decoder_intervals': len(intervals),
               'rt_failure_messages': sum(v['rt_failure_messages'] for v in seconds),
               'skipped_slot_messages': sum(v['skipped_slot_messages'] for v in seconds)}
@@ -144,33 +145,56 @@ def read_run(folder):
     return result, intervals, seconds, dqn
 
 
+GATED_CV_V3 = ('median_interval_avg_us', 'median_interval_max_us', 'max_interval_max_us')
+# v4 (declared before measurement): the run maximum of 60 per-second maxima is an
+# extreme-of-extremes statistic, so it is reported but not used as a CV gate.
+GATED_CV_V4 = ('median_interval_avg_us', 'median_interval_max_us')
+REPORTED_CV = GATED_CV_V3
+
+
 def baseline_gate(base, expected_context=None):
     base = Path(base)
     protocol = json.loads((base / 'protocol.json').read_text())
+    ctx = protocol['context']
+    version = ctx.get('gate_version', 3)
     paths = sorted(base.glob('*/run.json'))
-    results = [read_run(p.parent)[0] for p in paths]
+    all_results = [read_run(p.parent)[0] for p in paths]
     reasons = []
+    if version >= 4:
+        # A startup failure never reached active PHY, so no sample was observed;
+        # replacing it within a fixed cap is not selecting on outcomes.
+        cap = ctx['startup_replacement_cap']
+        startup = [r for r in all_results if r['startup_failure']]
+        results = [r for r in all_results if not r['startup_failure']]
+        measured_paths = [p for p, r in zip(paths, all_results) if not r['startup_failure']]
+        if len(startup) > cap:
+            reasons.append(f'startup failures {len(startup)} exceed predeclared cap {cap}')
+        gated = GATED_CV_V4
+    else:
+        startup, results, measured_paths, gated = [], all_results, paths, GATED_CV_V3
     if protocol.get('phase') != 'baseline' or len(results) != 10 or len(protocol.get('schedule', [])) != 10:
         reasons.append('requires exactly ten planned and completed baseline attempts')
     if any(r['threads'] != 0 or r['layout'] != protocol.get('layout') for r in results):
         reasons.append('baseline contains other conditions')
     if any(not r['valid'] for r in results):
         reasons.append('one or more invalid baseline runs')
-    if expected_context is not None and protocol['context'] != expected_context:
+    if expected_context is not None and ctx != expected_context:
         reasons.append('baseline context differs: binary/config/duration/collector/environment/threshold')
-    limit = protocol['context']['effect_pct'] / 4
+    limit = ctx['effect_pct'] / 4
     cvs = {}
-    for key in ['median_interval_avg_us', 'median_interval_max_us', 'max_interval_max_us']:
+    for key in REPORTED_CV:
         vals = [r[key] for r in results if r.get('valid') and key in r]
         cv = 100 * statistics.stdev(vals) / statistics.mean(vals) if len(vals) == 10 and statistics.mean(vals) > 0 else None
         cvs[key] = cv
-        if cv is None or cv > limit:
+        if key in gated and (cv is None or cv > limit):
             reasons.append(f'{key} CV exceeds {limit:g}% or cannot be calculated')
-    max_rt = protocol['context']['max_rt_per_second']
-    for p in paths:
+    max_rt = ctx['max_rt_per_second']
+    for p in measured_paths:
         if any(s['rt_failure_messages'] > max_rt for s in read_run(p.parent)[2]):
             reasons.append('baseline RT failure messages exceed declared per-second ceiling')
             break
     return {'passed': not reasons, 'reasons': reasons, 'attempts': len(results),
             'invalid_runs': sum(not r['valid'] for r in results), 'cv_pct': cvs,
-            'cv_limit_pct': limit, 'minimum_effect_pct': protocol['context']['effect_pct']}
+            'gated_cv': list(gated), 'gate_version': version,
+            'startup_failures': len(startup), 'launches': len(all_results),
+            'cv_limit_pct': limit, 'minimum_effect_pct': ctx['effect_pct']}

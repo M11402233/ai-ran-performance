@@ -42,6 +42,14 @@ def main():
                     'cpu_layout_plan': cpu_plan,
                     'startup_timeout_seconds': 30, 'main_pool_threads': 3,
                     'sampling_clock': 'monotonic deadlines with complete wall-second evidence; no catch-up'}
+    if cpu_plan.get('version', 3) >= 4:
+        session_plan.update(
+            gate_version=4, gated_cv=['median_interval_avg_us', 'median_interval_max_us'],
+            reported_only_cv=['max_interval_max_us'], startup_replacement_cap=3,
+            v4_rationale=('Declared before any v4 measurement and independent of results: the run maximum of 60 '
+                          'per-second maxima is an extreme-of-extremes statistic and is reported, not gated; a '
+                          'launch that never reaches active PHY yields no sample, so it is recorded and relaunched '
+                          'within a fixed cap. All v3 batches keep their original FAIL verdict.'))
     def interrupted(*_):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, interrupted)
