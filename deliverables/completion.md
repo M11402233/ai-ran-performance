@@ -10,7 +10,7 @@
 ## 驗收依據
 
 - 至少一組具有可重現性的 DU-only baseline：0 batches passed the unchanged ten-attempt baseline gate and recorded thread audit.
-- 有效的 DU 工作負載及量測紀錄：17 evidence-verified runs; decoder activity, complete interval logs, per-second CPU affinity and RT policy audited.
+- 有效的 DU 工作負載及量測紀錄：19 evidence-verified runs; decoder activity, complete interval logs, per-second CPU affinity and RT policy audited.
 - 完成 shared / split CPU 資源配置比較：Requires both matching baseline gates, all 40 matrix attempts, valid S0 controls, and >=3 repeat-matched valid pairs at each DQN thread level. Invalid fractions remain reported.
 - 有一張能解釋觀察結果與限制的圖：overview.png plus caption.md; valid/invalid counts, baseline gate, paired observations, metric and VM limitations.
 
@@ -19,8 +19,8 @@ baseline 通過表示同一批十次可重複，不是跨日期／跨主機重�
 
 ## 觀察
 
-計畫 20 次；已嘗試 20 次；證據有效 17 次。
-- S1 shared RT≤0：FAIL/pending；CV={'median_interval_avg_us': None, 'median_interval_max_us': None, 'max_interval_max_us': None}；原因=['one or more invalid baseline runs', 'median_interval_avg_us CV exceeds 5% or cannot be calculated', 'median_interval_max_us CV exceeds 5% or cannot be calculated', 'max_interval_max_us CV exceeds 5% or cannot be calculated', 'baseline RT failure messages exceed declared per-second ceiling']。
+計畫 20 次；已嘗試 20 次；證據有效 19 次。
+- S1 shared RT≤0：FAIL/pending；CV={'median_interval_avg_us': 2.013246703681568, 'median_interval_max_us': 21.807838504204483, 'max_interval_max_us': 31.095367282714825}；原因=['median_interval_max_us CV exceeds 5% or cannot be calculated', 'max_interval_max_us CV exceeds 5% or cannot be calculated', 'baseline RT failure messages exceed declared per-second ceiling']。
 - S2 split RT≤0：FAIL/pending；CV={'median_interval_avg_us': None, 'median_interval_max_us': None, 'max_interval_max_us': None}；原因=['one or more invalid baseline runs', 'median_interval_avg_us CV exceeds 5% or cannot be calculated', 'median_interval_max_us CV exceeds 5% or cannot be calculated', 'max_interval_max_us CV exceeds 5% or cannot be calculated', 'baseline RT failure messages exceed declared per-second ceiling']。
 
 ## 圖與資料

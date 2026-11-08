@@ -1,6 +1,6 @@
 # Baseline v3：RU 與採集器 CPU 分離
 
-狀態：程式、配置與非 RT smoke 已完成；尚未執行具 RT 權限的正式 baseline，不保證通過。
+更新（2026-11-08）：正式 v3 已結束，shared 10/10、split 9/10 有效，但兩組 gate 均未通過；詳見 [最終摘要](hardware-handoff-20261108.md)。下方保留量測前制定的協定與準備紀錄。
 
 ## 假說與本輪變更
 

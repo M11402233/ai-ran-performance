@@ -1,3 +1,3 @@
 stage,layout,threads,planned,attempted,invalid,not_attempted,invalid_fraction_of_attempts
-1,shared,0,10,10,1,0,0.1
-2,split,0,10,10,2,0,0.2
+1,shared,0,10,10,0,0,0.0
+2,split,0,10,10,1,0,0.1
